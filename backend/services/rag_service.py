@@ -1,147 +1,271 @@
 """
-PodGen AI - RAG Service
-Chunking, embedding, and semantic retrieval with FAISS.
+PodGen AI - Lightweight RAG Service
+Chunking + TF-IDF retrieval.
+
+Designed for low-memory/free deployments.
+Does not require SentenceTransformers, PyTorch, or FAISS.
 """
 
 import re
 import logging
-import numpy as np
 from typing import List, Tuple
+
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
 
 class RAGService:
-    """Lightweight RAG: chunk → embed → store → retrieve."""
+    """Lightweight RAG: chunk → TF-IDF → retrieve."""
 
-    CHUNK_SIZE = 800          # characters
+    CHUNK_SIZE = 800
     CHUNK_OVERLAP = 150
+    MAX_CHUNKS = 100
+    MAX_FEATURES = 5000
 
     def __init__(self):
-        self._embedder = None   # lazy-loaded
-        self._index = None
         self._chunks: List[str] = []
+        self._vectorizer = None
+        self._matrix = None
 
-    # ─── Public API ───────────────────────────────────────────────────────────
+    # ─── Public API ──────────────────────────────────────────────────────────
 
     def ingest(self, text: str) -> int:
-        """Chunk text and build a FAISS index. Returns chunk count."""
+        """
+        Chunk text and build a TF-IDF index.
+
+        Returns the number of chunks.
+        """
+
+        # Reset previous index
+        self._chunks = []
+        self._vectorizer = None
+        self._matrix = None
+
+        if not text or not text.strip():
+            return 0
+
+        # Create chunks
         self._chunks = self._chunk(text)
+
+        # Limit memory usage on free hosting
+        self._chunks = self._chunks[:self.MAX_CHUNKS]
+
         if not self._chunks:
             return 0
 
-        embeddings = self._embed(self._chunks)
-        self._build_index(embeddings)
+        logger.info(
+            "Creating TF-IDF index from %d chunks...",
+            len(self._chunks)
+        )
+
+        try:
+            self._vectorizer = TfidfVectorizer(
+                max_features=self.MAX_FEATURES,
+                stop_words="english",
+                ngram_range=(1, 2),
+                lowercase=True,
+                sublinear_tf=True
+            )
+
+            self._matrix = self._vectorizer.fit_transform(
+                self._chunks
+            )
+
+            logger.info(
+                "TF-IDF index ready: %d chunks, %d features",
+                self._matrix.shape[0],
+                self._matrix.shape[1]
+            )
+
+        except Exception:
+            logger.exception("Failed to create TF-IDF index")
+            self._chunks = []
+            self._vectorizer = None
+            self._matrix = None
+            return 0
+
         return len(self._chunks)
 
-    def retrieve(self, query: str, top_k: int = 6) -> List[str]:
-        """Return the top-k most relevant chunks for a query."""
-        if not self._chunks or self._index is None:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 6
+    ) -> List[str]:
+        """
+        Return the top-k most relevant chunks.
+        """
+
+        if (
+            not self._chunks
+            or self._vectorizer is None
+            or self._matrix is None
+            or not query
+        ):
             return []
 
-        q_emb = self._embed([query])[0]
         top_k = min(top_k, len(self._chunks))
 
-        distances, indices = self._index.search(
-            np.array([q_emb], dtype="float32"), top_k
-        )
-        return [self._chunks[i] for i in indices[0] if i < len(self._chunks)]
+        try:
+            query_vector = self._vectorizer.transform([query])
 
-    def get_summary_context(self, max_chars: int = 4000) -> str:
-        """Return a concatenated sample of chunks for summarization."""
+            scores = cosine_similarity(
+                query_vector,
+                self._matrix
+            ).flatten()
+
+            # Highest similarity first
+            indices = np.argsort(scores)[::-1][:top_k]
+
+            results = [
+                self._chunks[i]
+                for i in indices
+                if scores[i] > 0
+            ]
+
+            logger.info(
+                "Retrieved %d chunks for query",
+                len(results)
+            )
+
+            return results
+
+        except Exception:
+            logger.exception("TF-IDF retrieval failed")
+            return []
+
+    def get_summary_context(
+        self,
+        max_chars: int = 4000
+    ) -> str:
+        """
+        Return a concatenated sample of chunks for summarization.
+        """
+
         if not self._chunks:
             return ""
-        total, selected = 0, []
+
+        total = 0
+        selected = []
+
         for chunk in self._chunks:
+
             if total + len(chunk) > max_chars:
                 break
+
             selected.append(chunk)
             total += len(chunk)
+
         return "\n\n---\n\n".join(selected)
 
-    # ─── Chunking ─────────────────────────────────────────────────────────────
+    # ─── Chunking ────────────────────────────────────────────────────────────
 
     def _chunk(self, text: str) -> List[str]:
-        """Split text into overlapping chunks on sentence / paragraph boundaries."""
-        # Try to split on paragraph breaks first
-        paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+        """
+        Split text into overlapping chunks on
+        paragraph and sentence boundaries.
+        """
 
-        chunks, current = [], ""
+        text = text.strip()
+
+        if not text:
+            return []
+
+        # Normalize excessive whitespace
+        text = re.sub(r"[ \t]+", " ", text)
+
+        paragraphs = [
+            p.strip()
+            for p in re.split(r"\n{2,}", text)
+            if p.strip()
+        ]
+
+        chunks = []
+        current = ""
+
         for para in paragraphs:
+
+            # Normal paragraph fits in current chunk
             if len(current) + len(para) <= self.CHUNK_SIZE:
-                current = (current + "\n\n" + para).strip() if current else para
+
+                if current:
+                    current += "\n\n" + para
+                else:
+                    current = para
+
             else:
+
                 if current:
                     chunks.append(current)
-                # Para is itself too long → split by sentences
+
+                # Paragraph is too large
                 if len(para) > self.CHUNK_SIZE:
-                    sentences = re.split(r"(?<=[.!?])\s+", para)
+
+                    sentences = re.split(
+                        r"(?<=[.!?])\s+",
+                        para
+                    )
+
                     buf = ""
-                    for sent in sentences:
-                        if len(buf) + len(sent) <= self.CHUNK_SIZE:
-                            buf = (buf + " " + sent).strip()
+
+                    for sentence in sentences:
+
+                        if len(buf) + len(sentence) <= self.CHUNK_SIZE:
+
+                            buf = (
+                                buf + " " + sentence
+                            ).strip()
+
                         else:
+
                             if buf:
                                 chunks.append(buf)
-                            buf = sent
-                    if buf:
-                        current = buf
-                    else:
-                        current = ""
+
+                            buf = sentence
+
+                    current = buf
+
                 else:
                     current = para
 
         if current:
             chunks.append(current)
 
-        # Add overlap: prepend tail of previous chunk
+        # Add overlap
         overlapped = []
+
         for i, chunk in enumerate(chunks):
+
             if i > 0 and self.CHUNK_OVERLAP > 0:
-                tail = chunks[i - 1][-self.CHUNK_OVERLAP:]
-                chunk = tail + " " + chunk
+
+                previous_tail = chunks[i - 1][
+                    -self.CHUNK_OVERLAP:
+                ]
+
+                chunk = (
+                    previous_tail
+                    + " "
+                    + chunk
+                )
+
             overlapped.append(chunk.strip())
+
+        logger.info(
+            "Created %d text chunks",
+            len(overlapped)
+        )
 
         return overlapped
 
-    # ─── Embedding ────────────────────────────────────────────────────────────
+    # ─── Utility ─────────────────────────────────────────────────────────────
 
-    def _embed(self, texts: List[str]) -> np.ndarray:
-        """Embed texts using sentence-transformers (or a simple TF-IDF fallback)."""
-        try:
-            from sentence_transformers import SentenceTransformer
-            if self._embedder is None:
-                logger.info("Loading sentence-transformers model…")
-                self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
-            return self._embedder.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-        except ImportError:
-            logger.warning("sentence-transformers not installed – using TF-IDF fallback")
-            return self._tfidf_embed(texts)
+    def clear(self):
+        """Release RAG resources after a job."""
 
-    def _tfidf_embed(self, texts: List[str]) -> np.ndarray:
-        """Very simple bag-of-words fallback embedding."""
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        if not hasattr(self, "_tfidf_vocab"):
-            self._tfidf = TfidfVectorizer(max_features=512, stop_words="english")
-            all_docs = self._chunks if self._chunks else texts
-            self._tfidf.fit(all_docs)
-        mat = self._tfidf.transform(texts).toarray().astype("float32")
-        norms = np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9
-        return mat / norms
+        self._chunks = []
+        self._vectorizer = None
+        self._matrix = None
 
-    # ─── FAISS Index ──────────────────────────────────────────────────────────
-
-    def _build_index(self, embeddings: np.ndarray):
-        try:
-            import faiss
-            dim = embeddings.shape[1]
-            self._index = faiss.IndexFlatIP(dim)
-            self._index.add(embeddings.astype("float32"))
-        except ImportError:
-            logger.warning("faiss not installed – using numpy dot-product search")
-            self._fallback_embeddings = embeddings
-
-    def _numpy_search(self, q_emb: np.ndarray, top_k: int) -> Tuple[np.ndarray, np.ndarray]:
-        scores = self._fallback_embeddings @ q_emb
-        indices = np.argsort(scores)[::-1][:top_k]
-        return scores[indices], indices
+        logger.info("RAG index cleared")
