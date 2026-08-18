@@ -1,0 +1,32 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pydantic==2.9.0
+
+# LLM
+groq==0.13.1
+
+# Content extraction
+requests==2.32.3
+beautifulsoup4==4.12.3
+PyMuPDF==1.24.10
+pdfplumber==0.11.4
+python-docx==1.1.2
+
+# RAG
+sentence-transformers==3.1.1
+faiss-cpu==1.8.0
+scikit-learn==1.5.2
+numpy==1.26.4
+
+# Audio
+gTTS==2.5.3
+pydub==0.25.1
+
+# Optional high-quality TTS
+# elevenlabs==1.6.1
+
+# Utilities
+python-dotenv==1.0.1
+aiofiles==24.1.0
+httpx==0.28.1

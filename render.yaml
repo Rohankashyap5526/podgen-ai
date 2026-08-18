@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: podgen-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TTS_ENGINE
+        value: gtts
+    disk:
+      name: audio-storage
+      mountPath: /app/audio_output
+      sizeGB: 5
