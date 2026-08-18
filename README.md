@@ -2,6 +2,9 @@
 
 > **AI-powered podcast generation** from topics, URLs, and documents — using Groq (LLaMA 3.3 70B) for ultra-fast inference, RAG for context-aware scripts, and multi-speaker TTS for realistic audio.
 
+## 🌐 Live Demo
+
+**[🚀 Try PodGen AI Live](https://podgen-ai.vercel.app/)**
 ---
 
 ## ✨ Features
